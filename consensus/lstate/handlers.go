@@ -101,7 +101,7 @@ func (mb *Handlers) Store(v interface{}) error {
 			if err != nil {
 				return err
 			}
-			go mb.dm.DownloadTxs(txHshLst)
+			go mb.dm.DownloadTxs(roundState.height, roundState.round, txHshLst)
 		case *objs.PreVote:
 			err = roundState.SetPreVote(obj)
 			if err != nil {

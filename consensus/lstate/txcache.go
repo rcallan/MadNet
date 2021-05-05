@@ -6,25 +6,26 @@ import (
 	"github.com/MadBase/MadNet/consensus/appmock"
 	"github.com/MadBase/MadNet/interfaces"
 	"github.com/MadBase/MadNet/utils"
-	lru "github.com/hashicorp/golang-lru"
 )
 
 type txCache struct {
 	sync.RWMutex
-	cache *lru.Cache
+	// cache *lru.Cache
 	app   appmock.Application
+	cache map[uint32]map[string]string
 }
 
 func (txc *txCache) init() error {
-	cache, err := lru.New(4096)
-	if err != nil {
-		return err
-	}
-	txc.cache = cache
+	// cache, err := lru.New(4096)
+	// if err != nil {
+	// 	return err
+	// }
+	// txc.cache = cache
+	txc.cache = make(map[uint32]map[string]string)
 	return nil
 }
 
-func (txc *txCache) add(tx interfaces.Transaction) error {
+func (txc *txCache) add(height uint32, tx interfaces.Transaction) error {
 	txc.Lock()
 	defer txc.Unlock()
 	txHash, err := tx.TxHash()
@@ -35,35 +36,41 @@ func (txc *txCache) add(tx interfaces.Transaction) error {
 	if err != nil {
 		return err
 	}
-	txc.cache.Add(string(txHash), string(txb))
+	// txc.cache.Add(string(txHash), string(txb))
+	txc.cache[height][string(txHash)] = string(txb)
 	return nil
 }
 
-func (txc *txCache) containsTxHsh(txHsh []byte) bool {
+func (txc *txCache) containsTxHsh(height uint32, txHsh []byte) bool {
 	txc.RLock()
 	defer txc.RUnlock()
-	return txc.cache.Contains(string(txHsh))
+	_, exists := txc.cache[height][string(txHsh)]
+	// return txc.cache.Contains(string(txHsh))
+	return exists
 }
 
-func (txc *txCache) containsTx(tx interfaces.Transaction) (bool, error) {
+func (txc *txCache) containsTx(height uint32, tx interfaces.Transaction) (bool, error) {
 	txc.RLock()
 	defer txc.RUnlock()
 	txHsh, err := tx.TxHash()
 	if err != nil {
 		return false, err
 	}
-	return txc.cache.Contains(string(txHsh)), nil
+	_, exists := txc.cache[height][string(txHsh)]
+	return exists, nil
 }
 
-func (txc *txCache) get(txHsh []byte) (interfaces.Transaction, bool) {
+func (txc *txCache) get(height uint32, txHsh []byte) (interfaces.Transaction, bool) {
 	txc.RLock()
 	defer txc.RUnlock()
-	txIf, ok := txc.cache.Get(string(txHsh))
+	// txIf, ok := txc.cache.Get(string(txHsh))
+	txIf, ok := txc.cache[height][string(txHsh)]
 	if ok {
-		txb, ok := txIf.(string)
-		if !ok {
-			return nil, false
-		}
+		// txb, ok := txIf
+		// if !ok {
+		// 	return nil, false
+		// }
+		txb := txIf
 		tx, err := txc.app.UnmarshalTx(utils.CopySlice([]byte(txb)))
 		if err != nil {
 			return nil, false
@@ -73,21 +80,24 @@ func (txc *txCache) get(txHsh []byte) (interfaces.Transaction, bool) {
 	return nil, false
 }
 
-func (txc *txCache) getMany(txHashes [][]byte) ([]interfaces.Transaction, [][]byte) {
+func (txc *txCache) getMany(height uint32, txHashes [][]byte) ([]interfaces.Transaction, [][]byte) {
 	txc.RLock()
 	defer txc.RUnlock()
 	result := []interfaces.Transaction{}
 	missing := [][]byte{}
 	for i := 0; i < len(txHashes); i++ {
-		txIf, ok := txc.cache.Get(string(txHashes[i]))
-		if !ok {
-			continue
-		}
-		txb, ok := txIf.(string)
+		// txIf, ok := txc.cache.Get(string(txHashes[i]))
+		txIf, ok := txc.cache[height][string(txHashes[i])]
 		if !ok {
 			missing = append(missing, utils.CopySlice(txHashes[i]))
 			continue
 		}
+		txb := txIf
+		// txb, ok := txIf.(string)
+		// if !ok {
+		// 	missing = append(missing, utils.CopySlice(txHashes[i]))
+		// 	continue
+		// }
 		tx, err := txc.app.UnmarshalTx(utils.CopySlice([]byte(txb)))
 		if err != nil {
 			missing = append(missing, utils.CopySlice(txHashes[i]))
@@ -98,24 +108,28 @@ func (txc *txCache) getMany(txHashes [][]byte) ([]interfaces.Transaction, [][]by
 	return result, missing
 }
 
-func (txc *txCache) removeTx(tx interfaces.Transaction) (bool, error) {
+func (txc *txCache) removeTx(height uint32, tx interfaces.Transaction) error {
 	txc.Lock()
 	defer txc.Unlock()
 	txHsh, err := tx.TxHash()
 	if err != nil {
-		return false, err
+		return err
 	}
-	return txc.cache.Remove(string(txHsh)), nil
+	delete(txc.cache[height], string(txHsh))
+	return nil
+	// return txc.cache.Remove(string(txHsh)), nil
 }
 
-func (txc *txCache) del(txHsh []byte) bool {
+func (txc *txCache) del(height uint32, txHsh []byte) {
 	txc.Lock()
 	defer txc.Unlock()
-	return txc.cache.Remove(string(txHsh))
+	// return txc.cache.Remove(string(txHsh))
+	delete(txc.cache[height], string(txHsh))
 }
 
 func (txc *txCache) purge() {
 	txc.Lock()
 	defer txc.Unlock()
-	txc.cache.Purge()
+	// txc.cache.Purge()
+	txc.cache = make(map[uint32]map[string]string)
 }

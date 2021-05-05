@@ -39,7 +39,7 @@ func (ce *Engine) getValidValue(rs *RoundStates) ([][]byte, []byte, []byte, []by
 		utils.DebugTrace(ce.logger, err)
 		return nil, nil, nil, nil, err
 	}
-	if err := ce.dm.AddTxs(rs.txn, height+1, txs, false); err != nil {
+	if err := ce.dm.AddTxs(rs.txn, height+1, txs); err != nil {
 		utils.DebugTrace(ce.logger, err)
 		return nil, nil, nil, nil, err
 	}
@@ -79,7 +79,7 @@ func (ce *Engine) isValid(rs *RoundStates, chainID uint32, stateHash []byte, hea
 		utils.DebugTrace(ce.logger, nil, "headerRoots do not match")
 		return false, nil // TODO: do we want to return an error here?
 	}
-	if err := ce.dm.AddTxs(rs.txn, height+1, txs, false); err != nil {
+	if err := ce.dm.AddTxs(rs.txn, height+1, txs); err != nil {
 		utils.DebugTrace(ce.logger, err)
 		return false, err
 	}
@@ -95,7 +95,7 @@ func (ce *Engine) isValid(rs *RoundStates, chainID uint32, stateHash []byte, hea
 	if !ok {
 		return false, errorz.ErrInvalid{}.New("is valid returned not ok")
 	}
-	if err := ce.dm.AddTxs(rs.txn, height+1, txs, false); err != nil {
+	if err := ce.dm.AddTxs(rs.txn, height+1, txs); err != nil {
 		utils.DebugTrace(ce.logger, err)
 		return false, err
 	}
@@ -104,14 +104,15 @@ func (ce *Engine) isValid(rs *RoundStates, chainID uint32, stateHash []byte, hea
 
 func (ce *Engine) applyState(rs *RoundStates, chainID uint32, txHashes [][]byte) error {
 	height := rs.OwnState.SyncToBH.BClaims.Height
-	txs, missing, err := ce.dm.GetTxs(rs.txn, height+1, txHashes)
+	round := rs.round
+	txs, missing, err := ce.dm.GetTxs(rs.txn, height+1, round, txHashes)
 	if err != nil {
 		return err
 	}
 	if len(missing) > 0 {
 		return errorz.ErrMissingTransactions
 	}
-	if err := ce.dm.AddTxs(rs.txn, height+1, txs, false); err != nil {
+	if err := ce.dm.AddTxs(rs.txn, height+1, txs); err != nil {
 		utils.DebugTrace(ce.logger, err)
 		return err
 	}

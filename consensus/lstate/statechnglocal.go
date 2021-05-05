@@ -240,7 +240,7 @@ func (pvnewh *dPPVSPreVoteNewHandler) evalLogic() error {
 }
 
 func (ce *Engine) dPPVSPreVoteNewFunc(rs *RoundStates, p *objs.Proposal) error {
-	txs, _, err := ce.dm.GetTxs(rs.txn, p.PClaims.BClaims.Height, p.TxHshLst)
+	txs, _, err := ce.dm.GetTxs(rs.txn, p.PClaims.BClaims.Height, rs.round, p.TxHshLst)
 	if err == nil {
 		ok, err := ce.isValid(rs, p.PClaims.BClaims.ChainID, p.PClaims.BClaims.StateRoot, p.PClaims.BClaims.HeaderRoot, txs)
 		if err != nil {
@@ -1245,7 +1245,7 @@ func (ce *Engine) dHJSJumpFunc(rs *RoundStates, rcert *objs.RCert) error {
 
 func (ce *Engine) updateValidValue(rs *RoundStates, p *objs.Proposal) error {
 	ce.logger.Debugf("updateValidValue:    MAXBH:%v    STBH:%v    RH:%v    RN:%v", rs.OwnState.MaxBHSeen.BClaims.Height, rs.OwnState.SyncToBH.BClaims.Height, rs.OwnRoundState().RCert.RClaims.Height, rs.OwnRoundState().RCert.RClaims.Round)
-	txs, _, err := ce.dm.GetTxs(rs.txn, p.PClaims.BClaims.Height, p.TxHshLst)
+	txs, _, err := ce.dm.GetTxs(rs.txn, p.PClaims.BClaims.Height, rs.round, p.TxHshLst)
 	if err != nil {
 		if err != errorz.ErrMissingTransactions {
 			utils.DebugTrace(ce.logger, err)

@@ -2,7 +2,7 @@ package constants
 
 const (
 	// EpochLength is the number of blocks in an epoch for MadNet
-	EpochLength uint32 = 1024
+	EpochLength uint32 = 32
 
 	// HashLen specifies the length of a hash in bytes
 	HashLen = 32
