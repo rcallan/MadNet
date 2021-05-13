@@ -7,43 +7,31 @@ import (
 
 type bHCache struct {
 	// seems like we should probably put a lock on this
-	// cache *lru.Cache
-	cache map[uint32]map[string]string
+	cache map[uint32]string
 }
 
 func (bhc *bHCache) init() error {
-	// cache, err := lru.New(int(constants.EpochLength * 4))
-	// if err != nil {
-	// 	return err
-	// }
-	// bhc.cache = cache
-	bhc.cache = make(map[uint32]map[string]string)
+	bhc.cache = make(map[uint32]string)
 	return nil
 }
 
 func (bhc *bHCache) add(height uint32, bh *objs.BlockHeader) error {
-	bHsh, err := bh.BClaims.BlockHash()
-	if err != nil {
-		return err
-	}
 	bhBytes, err := bh.MarshalBinary()
 	if err != nil {
 		return err
 	}
-	// bhc.cache.Add(string(bHsh), string(bhBytes))
-	bhc.cache[height][string(bHsh)] = string(bhBytes)
+	bhc.cache[height] = string(bhBytes)
 	return nil
 }
 
-func (bhc *bHCache) containsBlockHash(height uint32, bHsh []byte) bool {
-	_, exists := bhc.cache[height][string(bHsh)]
-	// return bhc.cache.Contains(string(bHsh))
+func (bhc *bHCache) containsBlockHash(height uint32) bool {
+	_, exists := bhc.cache[height]
 	return exists
 }
 
-func (bhc *bHCache) get(height uint32, bHsh []byte) (*objs.BlockHeader, bool) {
-	// bhIf, ok := bhc.cache.Get(string(bHsh))
-	bhIf, ok := bhc.cache[height][string(bHsh)]
+// refactor to just use height
+func (bhc *bHCache) get(height uint32) (*objs.BlockHeader, bool) {
+	bhIf, ok := bhc.cache[height]
 	if ok {
 		bhString := bhIf
 		bhBytes := []byte(bhString)
@@ -51,7 +39,7 @@ func (bhc *bHCache) get(height uint32, bHsh []byte) (*objs.BlockHeader, bool) {
 		bh := &objs.BlockHeader{}
 		err := bh.UnmarshalBinary(bhCopy)
 		if err != nil {
-			bhc.removeBlockHash(height, bHsh)
+			bhc.removeBlockHeader(height)
 			return nil, false
 		}
 		return bh, true
@@ -59,12 +47,10 @@ func (bhc *bHCache) get(height uint32, bHsh []byte) (*objs.BlockHeader, bool) {
 	return nil, false
 }
 
-func (bhc *bHCache) removeBlockHash(height uint32, bHsh []byte) {
-	delete(bhc.cache[height], string(bHsh))
-	// return bhc.cache.Remove(string(bHsh))
+func (bhc *bHCache) removeBlockHeader(height uint32) {
+	delete(bhc.cache, height)
 }
 
 func (bhc *bHCache) purge() {
-	bhc.cache = make(map[uint32]map[string]string)
-	// bhc.cache.Purge()
+	bhc.cache = make(map[uint32]string)
 }

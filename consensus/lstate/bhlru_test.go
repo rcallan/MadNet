@@ -49,11 +49,11 @@ func TestBHAddGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bHsh, err := bh.BlockHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bh2, ok := bhc.get(0, bHsh)
+	// bHsh, err := bh.BlockHash()
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	bh2, ok := bhc.get(0)
 	if !ok {
 		t.Fatal("not ok")
 	}
@@ -77,20 +77,20 @@ func TestBHAddContainsRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	bh := maketestBH()
-	bHsh, err := bh.BClaims.BlockHash()
-	if err != nil {
-		t.Fatal(err)
-	}
+	// bHsh, err := bh.BClaims.BlockHash()
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
 	err = bhc.add(0, bh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bhc.removeBlockHash(0, bHsh)
+	bhc.removeBlockHeader(0)
 	// present := bhc.removeBlockHash(0, bHsh)
 	// if !present {
 	// 	t.Fatal("Contains bh after it should have been removed!")
 	// }
-	present := bhc.containsBlockHash(0, bHsh)
+	present := bhc.containsBlockHash(0)
 	if present {
 		t.Fatal("Contains bh!")
 	}
@@ -107,16 +107,16 @@ func TestBHPurge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bHsh, err := bh.BClaims.BlockHash()
-	if err != nil {
-		t.Fatal(err)
-	}
-	present := bhc.containsBlockHash(0, bHsh)
+	// bHsh, err := bh.BClaims.BlockHash()
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	present := bhc.containsBlockHash(0)
 	if !present {
 		t.Fatal("Does not contain bh!")
 	}
 	bhc.purge()
-	present = bhc.containsBlockHash(0, bHsh)
+	present = bhc.containsBlockHash(0)
 	if present {
 		t.Fatal("Contains bh!")
 	}

@@ -115,6 +115,12 @@ func (ce *Engine) UpdateLocalState() (bool, error) {
 	// ce.logger.Error("!!! OPEN UpdateLocalState TXN")
 	// defer func() { ce.logger.Error("!!! CLOSE UpdateLocalState TXN") }()
 	err := ce.database.Update(func(txn *badger.Txn) error {
+
+		err := ce.dm.FlushCacheToDisk(txn)
+		if err != nil {
+			return err
+		}
+
 		ownState, err := ce.database.GetOwnState(txn)
 		if err != nil {
 			return err
@@ -720,6 +726,13 @@ func (ce *Engine) Sync() (bool, error) {
 	// ce.logger.Error("!!! OPEN SYNC TXN")
 	// defer func() { ce.logger.Error("!!! CLOSE SYNC TXN") }()
 	err := ce.database.Update(func(txn *badger.Txn) error {
+
+		err := ce.dm.FlushCacheToDisk(txn)
+		if err != nil {
+			utils.DebugTrace(ce.dm.logger, err)
+			return err
+		}
+
 		rs, err := ce.sstore.LoadLocalState(txn)
 		if err != nil {
 			utils.DebugTrace(ce.logger, err)

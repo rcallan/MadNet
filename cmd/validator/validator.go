@@ -409,6 +409,8 @@ func validatorNode(cmd *cobra.Command, args []string) {
 	go gc.Start()
 	defer gc.Close()
 	defer gh.Close()
+	// not sure if we should send signals to the close chans of the actors in this function
+	// defer dman.Close()
 
 	go stateRPC.Serve()
 	defer stateRPC.Close()

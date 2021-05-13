@@ -171,7 +171,7 @@ func (mb *Handlers) Store(v interface{}) error {
 		case *objs.BlockHeader:
 			ownState := roundState.OwnState
 			if obj.BClaims.Height <= ownState.MaxBHSeen.BClaims.Height {
-				return errorz.ErrInvalid{}.New("stale bh  - <= MaxBHSeen")
+				return errorz.ErrInvalid{}.New("stale bh - <= MaxBHSeen")
 			}
 			if obj.BClaims.Height <= ownState.SyncToBH.BClaims.Height {
 				return errorz.ErrInvalid{}.New("stale bh - <= SyncTOBH ")

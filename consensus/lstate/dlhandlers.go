@@ -1,11 +1,14 @@
 package lstate
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/MadBase/MadNet/constants"
+	"github.com/MadBase/MadNet/crypto"
 	"github.com/MadBase/MadNet/errorz"
 
 	"github.com/MadBase/MadNet/consensus/appmock"
@@ -19,7 +22,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var errExpiredCtx = errors.New("ctx canceled")
+// var errExpiredCtx = errors.New("ctx canceled")
 
 type txResult struct {
 	logger     *logrus.Logger
@@ -71,17 +74,17 @@ func (t *txResult) addMany(txs []interfaces.Transaction) error {
 	return err
 }
 
-func (t *txResult) addManyRaw(txs [][]byte) error {
-	var err error
-	for i := 0; i < len(txs); i++ {
-		e := t.addRaw(txs[i])
-		if e != nil {
-			err = e
-			utils.DebugTrace(t.logger, err)
-		}
-	}
-	return err
-}
+// func (t *txResult) addManyRaw(txs [][]byte) error {
+// 	var err error
+// 	for i := 0; i < len(txs); i++ {
+// 		e := t.addRaw(txs[i])
+// 		if e != nil {
+// 			err = e
+// 			utils.DebugTrace(t.logger, err)
+// 		}
+// 	}
+// 	return err
+// }
 
 func (t *txResult) addRaw(txb []byte) error {
 	tx, err := t.appHandler.UnmarshalTx(utils.CopySlice(txb))
@@ -93,12 +96,12 @@ func (t *txResult) addRaw(txb []byte) error {
 }
 
 type DMan struct {
+	// requestus     *request.Client MOVE INTO ROOT ACTOR
 	downloadActor *RootActor
 	database      db.DatabaseIface
 	appHandler    appmock.Application
-	// requestus     *request.Client MOVE INTO ROOT ACTOR
-	txc    *txCache
-	bhc    *bHCache
+	// txc           *txCache
+	// bhc           *bHCache
 	logger *logrus.Logger
 }
 
@@ -110,19 +113,19 @@ func (dm *DMan) Init(database db.DatabaseIface, app appmock.Application, reqBus 
 	//TODO MAKE AND INIT ROOT ACTOR
 
 	dm.downloadActor = &RootActor{}
-	dm.downloadActor.Init(dm.logger, reqBus, dm.appHandler.UnmarshalTx)
+	go dm.downloadActor.Init(dm.logger, reqBus, dm.appHandler.UnmarshalTx)
 
-	dm.txc = &txCache{
+	dm.downloadActor.txc = &txCache{
 		app: dm.appHandler,
 	}
-	err := dm.txc.init()
+	err := dm.downloadActor.txc.init()
 	if err != nil {
 		utils.DebugTrace(dm.logger, err)
 		return err
 	}
 
-	dm.bhc = &bHCache{}
-	err = dm.bhc.init()
+	dm.downloadActor.bhc = &bHCache{}
+	err = dm.downloadActor.bhc.init()
 	if err != nil {
 		utils.DebugTrace(dm.logger, err)
 		return err
@@ -130,11 +133,35 @@ func (dm *DMan) Init(database db.DatabaseIface, app appmock.Application, reqBus 
 	return nil
 }
 
+func (dm *DMan) Close() {
+	dm.downloadActor.wg.Wait()
+}
+
 func (dm *DMan) FlushCacheToDisk(txn *badger.Txn) error {
 	// TODO CALL THIS METHOD AT THE START OF UPDATELOCALSTATE
 	// TODO CALL THIS METHOD AT THE START OF SYNC
 	// TODO WRITE ALL CONTENTS OF CACHE TO DISK
+
+	for height := range dm.downloadActor.txc.cache {
+		for txHash, tx := range dm.downloadActor.txc.cache[height] {
+			err := dm.database.SetTxCacheItem(txn, height, []byte(txHash), []byte(tx))
+			if err != nil {
+				return err
+			}
+		}
+	}
+	for height := range dm.downloadActor.bhc.cache {
+		currentBH, exists := dm.downloadActor.bhc.get(height)
+		if exists {
+			dm.database.SetCommittedBlockHeader(txn, currentBH)
+		}
+	}
+
 	// REMOVE ALL WRITTEN ELEMENTS FROM CACHE
+
+	dm.downloadActor.txc.purge()
+	dm.downloadActor.bhc.purge()
+
 	return nil
 }
 
@@ -210,7 +237,7 @@ func (dm *DMan) GetTxs(txn *badger.Txn, height, round uint32, txLst [][]byte) ([
 // the canonical bh before we begin unless we are syncing from a height gt the
 // canonical bh
 func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transaction, *objs.BlockHeader, error) {
-	panic("NOT IMPLEMENTED")
+	// panic("NOT IMPLEMENTED")
 	// TODO
 	// CHECK WHAT BLOCK HEADER WE SHOULD BE DOWNLOADING BY READING THE DATABASE
 	// CHECK IF THIS BLOCKHEADER IS WRITTEN TO THE ON DISK CACHE OF DOWNLOADED OBJECTS
@@ -223,6 +250,74 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 	// DELETE BLOCKHEADER AND ALL TXS FROM ON DISK CACHE
 	// RETURN
 
+	bhCache, inCache := dm.downloadActor.bhc.get(rs.OwnState.SyncToBH.BClaims.Height + 1)
+	if !inCache {
+		// was using rs.round for last value here previously
+		dm.downloadActor.DownloadBlockHeader(rs.OwnState.SyncToBH.BClaims.Height+1, 0)
+		return nil, nil, errorz.ErrInvalid{}.New("block header was not in the bh cache")
+	} else {
+		txs, missing, err := dm.GetTxs(txn, rs.OwnState.SyncToBH.BClaims.Height+1, 0, bhCache.TxHshLst)
+		if err != nil {
+			utils.DebugTrace(dm.logger, err)
+			return nil, nil, err
+		}
+		if len(missing) > 0 {
+			dm.DownloadTxs(rs.OwnState.SyncToBH.BClaims.Height+1, 0, missing)
+			return nil, nil, errorz.ErrInvalid{}.New("missing transactions")
+		}
+
+		// check the chainID of bh
+		if bhCache.BClaims.ChainID != rs.OwnState.SyncToBH.BClaims.ChainID {
+			return nil, nil, errorz.ErrInvalid{}.New("Wrong chainID")
+		}
+
+		// check the height of the bh
+		if bhCache.BClaims.Height != rs.OwnState.SyncToBH.BClaims.Height+1 {
+			return nil, nil, errorz.ErrInvalid{}.New("Wrong block height")
+		}
+		prevBHsh, err := rs.OwnState.SyncToBH.BlockHash() // get block hash
+		if err != nil {
+			utils.DebugTrace(dm.logger, err)
+			return nil, nil, err
+		}
+		// compare to prevBlock from bh
+		if !bytes.Equal(bhCache.BClaims.PrevBlock, prevBHsh) {
+			return nil, nil, errorz.ErrInvalid{}.New("BlockHash does not match previous!")
+		}
+
+		// create the signature validator
+		bnVal := &crypto.BNGroupValidator{}
+
+		// verify the signature and group key
+		GroupKey := bhCache.GroupKey
+		if err := bhCache.ValidateSignatures(bnVal); err != nil {
+			utils.DebugTrace(dm.logger, err)
+			return nil, nil, errorz.ErrInvalid{}.New(err.Error())
+		}
+		if !bytes.Equal(GroupKey, rs.ValidatorSet.GroupKey) {
+			return nil, nil, errorz.ErrInvalid{}.New("group key does not match expected")
+		}
+
+		err = dm.database.SetCommittedBlockHeader(txn, bhCache)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		dm.downloadActor.bhc.removeBlockHeader(rs.OwnState.SyncToBH.BClaims.Height + 1)
+		for i := 0; i < len(txs); i++ {
+			dm.downloadActor.txc.removeTx(rs.OwnState.SyncToBH.BClaims.Height+1, txs[i])
+		}
+
+		if rs.OwnState.SyncToBH.BClaims.Height > 10 {
+			if err := dm.database.TxCacheDropBefore(txn, rs.OwnState.SyncToBH.BClaims.Height-5, 1000); err != nil {
+				utils.DebugTrace(dm.logger, err)
+				return nil, nil, err
+			}
+		}
+
+		return txs, bhCache, nil
+	}
+
 	/*
 		invoke this logic on exit:
 			if height > 10 {
@@ -233,274 +328,19 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 			}
 			return nil
 	*/
-	/*
 
-		ra := RootActor{}
-			ra.Init(dm.logger, dm.requestBus, dm.appHandler.UnmarshalTx)
-
-		// create the signature validator
-			bnVal := &crypto.BNGroupValidator{}
-
-		// assign the target height
-			targetHeight := rs.OwnState.SyncToBH.BClaims.Height + 1
-			if targetHeight > dm.height {
-				dm.height = targetHeight
-		}
-
-		if dm.targetBlockHDR != nil {
-				if dm.targetBlockHDR.BClaims.Height < targetHeight {
-					dm.targetBlockHDR = nil
-				}
-		}
-
-		if dm.targetBlockHDR == nil {
-
-			// create a nested context with timeout for request
-				// ctx, cancelFunc := context.WithTimeout(context.Background(), constants.MsgTimeout)
-				// defer cancelFunc()
-
-			// do the request
-				// bhLst, err := dm.requestBus.RequestP2PGetBlockHeaders(ctx, []uint32{targetHeight})
-				// if err != nil {
-				// 	utils.DebugTrace(dm.logger, err)
-				// 	return nil, nil, errorz.ErrInvalid{}.New("get BlockHeaders failed")
-				// }
-
-			req := NewBlockHeaderDownloadRequest(dm.height, rs.round, BlockHeaderRequest)
-				resp, err := ra.download(req)
-				if err != nil {
-					utils.DebugTrace(dm.logger, err)
-					return nil, nil, errorz.ErrInvalid{}.New("get BlockHeaders failed")
-				}
-
-			// if we got back too many block headers then return
-				// if len(bhLst) != 1 {
-				// 	return nil, nil, errorz.ErrInvalid{}.New("len(bhLst) != 1")
-				// }
-
-			// bh is element zero of bhLst
-				// bh := bhLst[0]
-
-			bh := resp.(*BlockHeaderDownloadResponse).BH
-
-			// check the chainID of bh
-				if bh.BClaims.ChainID != rs.OwnState.SyncToBH.BClaims.ChainID {
-					return nil, nil, errorz.ErrInvalid{}.New("Wrong chainID")
-				}
-
-			// check the height of the bh
-				if bh.BClaims.Height != targetHeight {
-					return nil, nil, errorz.ErrInvalid{}.New("Wrong block height")
-			}
-				prevBHsh, err := rs.OwnState.SyncToBH.BlockHash() // get block hash
-				if err != nil {
-					utils.DebugTrace(dm.logger, err)
-					return nil, nil, err
-			}
-				// compare to prevBlock from bh
-				if !bytes.Equal(bh.BClaims.PrevBlock, prevBHsh) {
-					return nil, nil, errorz.ErrInvalid{}.New("BlockHash does not match previous!")
-				}
-
-			// verify the signature and group key
-				GroupKey := bh.GroupKey
-				if err := bh.ValidateSignatures(bnVal); err != nil {
-					utils.DebugTrace(dm.logger, err)
-					return nil, nil, errorz.ErrInvalid{}.New(err.Error())
-				}
-				if !bytes.Equal(GroupKey, rs.ValidatorSet.GroupKey) {
-					return nil, nil, errorz.ErrInvalid{}.New("group key does not match expected")
-				}
-				dm.targetBlockHDR = bh
-			}
-
-		if dm.targetBlockHDR != nil {
-				txs, missing, err := dm.getTxsInternal(txn, dm.targetBlockHDR.BClaims.Height, rs.round, dm.targetBlockHDR.TxHshLst)
-				if err != nil {
-					utils.DebugTrace(dm.logger, err)
-					return nil, nil, err
-				}
-				if len(missing) > 0 {
-					utils.DebugTrace(dm.logger, err)
-					return nil, nil, errorz.ErrMissingTransactions
-			}
-				return txs, dm.targetBlockHDR, nil
-			}
-			return nil, nil, errorz.ErrMissingTransactions
-	*/
 }
 
 func (dm *DMan) DownloadTxs(height, round uint32, txHshLst [][]byte) {
 	missingCount := 0
 	for i := 0; i < len(txHshLst); i++ {
 		txHsh := txHshLst[i]
-		if !dm.txc.containsTxHsh(height, utils.CopySlice(txHsh)) {
+		if !dm.downloadActor.txc.containsTxHsh(height, utils.CopySlice(txHsh)) {
 			missingCount++
-			req := NewTxDownloadRequest(txHsh, PendingAndMinedTxRequest, height, round)
-			dm.downloadActor.download(req)
+			dm.downloadActor.DownloadTx(height, round, txHsh)
 		}
 	}
 }
-
-/*
-type outVal struct {
-	tx  interfaces.Transaction
-	err error
-}
-
-func (dm *DMan) runRaf() {
-
-	var actors []*reqActor
-	// create actors
-	for i := 0; i < maxDLCount; i++ {
-		actors = append(actors, &reqActor{dm: dm})
-	}
-
-	for {
-		// get a request
-		req := <-dm.raf.in
-
-		for {
-			// if all actors are currently active, then wait a little and try again
-			if dm.numProcesses >= uint(maxDLCount) {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// look for an actor that is not currently processing and use that one for the request
-			for _, a := range actors {
-				if !dm.actorActivity[a] {
-					dm.actorActivity[a] = true
-					dm.raf.wg.Add(1)
-
-					a.txHsh = req
-					go a.process(dm.raf.wg, dm.raf.sendCh)
-					dm.raf.sendCh <- dm.raf.recvCh
-					dm.numProcesses++
-					break
-				}
-			}
-		}
-
-	}
-}
-
-type reqActor struct {
-	txHsh []byte
-	dm    *DMan
-}
-
-func (ra *reqActor) cleanup() {
-	ra.dm.actorActivity[ra] = false
-	ra.dm.numProcesses--
-}
-
-func (ra *reqActor) process(wg *sync.WaitGroup, ch <-chan chan outVal) {
-	defer wg.Done()
-	defer ra.cleanup()
-	out := <-ch
-
-	// should we be using some kind of different context here
-
-	subCtx, cf := context.WithTimeout(ra.dm.ctx, constants.MsgTimeout)
-	defer cf()
-	txLst, err := ra.dm.requestBus.RequestP2PGetPendingTx(subCtx, [][]byte{utils.CopySlice(ra.txHsh)})
-	if err == nil && len(txLst) == 1 {
-		tx, err := ra.dm.appHandler.UnmarshalTx(txLst[0])
-		if err == nil {
-			// return tx, nil
-			out <- outVal{tx, nil}
-		}
-	}
-
-	subCtx2, cf2 := context.WithTimeout(ra.dm.ctx, constants.MsgTimeout)
-	defer cf2()
-	txLst, err = ra.dm.requestBus.RequestP2PGetMinedTxs(subCtx2, [][]byte{ra.txHsh})
-	if err != nil {
-		utils.DebugTrace(ra.dm.logger, err)
-		// return nil, errorz.ErrInvalid{}.New(err.Error())
-		out <- outVal{nil, errorz.ErrInvalid{}.New(err.Error())}
-	}
-	if len(txLst) != 1 {
-		// return nil, errorz.ErrInvalid{}.New("Downloaded more than 1 txn when only should have 1")
-		out <- outVal{nil, errorz.ErrInvalid{}.New("Downloaded more than 1 txn when only should have 1")}
-	}
-	tx, err := ra.dm.appHandler.UnmarshalTx(utils.CopySlice(txLst[0]))
-	if err != nil {
-		utils.DebugTrace(ra.dm.logger, err)
-		// return nil, err
-		out <- outVal{nil, err}
-	}
-	// return tx, nil
-	out <- outVal{tx, nil}
-}
-
-// should be owned by dl cache
-func (dm *DMan) downloadWithRetry(ctx context.Context, txc *txCache, txHsh []byte, raf *reqActorFactory) {
-	// could probably record the height when we first enter this function or possibly pass the initial height in
-	// as a parameter. we could then exit the repeating for loop if dm.height somehow changes
-
-	// subCtx, cancelFunc := context.WithCancel(ctx)
-	// defer cancelFunc()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			// check if we have the tx
-			if txc.containsTxHsh(dm.height, utils.CopySlice(txHsh)) {
-				return
-			}
-			tx, err := func() (interfaces.Transaction, error) {
-
-				raf.in <- txHsh
-
-				if dm.numProcesses > 0 {
-					ov := <-dm.raf.recvCh
-					return ov.tx, ov.err
-				}
-
-				// return ov.txn, nil
-				return nil, nil
-			}()
-			if err != nil {
-				utils.DebugTrace(dm.logger, err)
-				// if an error was returned, wait a small timeout and continue
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			txhshReturned, err := tx.TxHash()
-			if err != nil {
-				utils.DebugTrace(dm.logger, err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			if !bytes.Equal(txhshReturned, txHsh) {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			err = func() error {
-				dm.Lock()
-				defer dm.Unlock()
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-					if err := txc.add(dm.height, tx); err != nil {
-						utils.DebugTrace(dm.logger, err)
-						return err
-					}
-				}
-				return nil
-			}()
-			if err == nil {
-				return
-			}
-		}
-	}
-}
-*/
 
 type DownloadRequest interface {
 	DownloadType() DownloadType
@@ -597,9 +437,9 @@ func (r *TxDownloadResponse) RequestRound() uint32 {
 	return r.Round
 }
 
-func NewTxDownloadResponse(req *TxDownloadRequest, tx interfaces.Transaction, err error) *TxDownloadResponse {
+func NewTxDownloadResponse(req *TxDownloadRequest, tx interfaces.Transaction, dlt DownloadType, err error) *TxDownloadResponse {
 	return &TxDownloadResponse{
-		downloadType: req.downloadType,
+		downloadType: dlt,
 		TxHash:       utils.CopySlice(req.TxHash),
 		Tx:           tx,
 		Err:          err,
@@ -670,7 +510,7 @@ func (r *BlockHeaderDownloadResponse) RequestRound() uint32 {
 	return r.Round
 }
 
-func NewBlockHeaderDownloadResponse(req *BlockHeaderDownloadRequest, bh *objs.BlockHeader, err error) *BlockHeaderDownloadResponse {
+func NewBlockHeaderDownloadResponse(req *BlockHeaderDownloadRequest, bh *objs.BlockHeader, dlt DownloadType, err error) *BlockHeaderDownloadResponse {
 	return &BlockHeaderDownloadResponse{
 		downloadType: req.downloadType,
 		Height:       req.Height,
@@ -689,9 +529,12 @@ type RootActor struct {
 	txc       *txCache
 	bhc       *bHCache
 	logger    *logrus.Logger
+	reqs      map[DownloadRequest]bool
 }
 
 func (a *RootActor) Init(logger *logrus.Logger, rb *request.Client, unmarshalTx func([]byte) (interfaces.Transaction, error)) {
+	a.reqs = make(map[DownloadRequest]bool)
+
 	numWorkers := 10
 	a.wg = new(sync.WaitGroup)
 	a.closeChan = make(chan struct{}, 1)
@@ -727,26 +570,41 @@ func (a *RootActor) Init(logger *logrus.Logger, rb *request.Client, unmarshalTx 
 	}
 }
 
-func (a *RootActor) DownloadPendingTx(block, round uint32, txHash []byte) {
-	panic("not implemented")
+func (a *RootActor) DownloadPendingTx(height, round uint32, txHash []byte) {
+	req := NewTxDownloadRequest(txHash, PendingTxRequest, height, round)
+	a.download(req)
 }
 
-func (a *RootActor) DownloadMinedTx(block, round uint32, txHash []byte) {
-	panic("not implemented")
+func (a *RootActor) DownloadMinedTx(height, round uint32, txHash []byte) {
+	req := NewTxDownloadRequest(txHash, MinedTxRequest, height, round)
+	a.download(req)
 }
 
-func (a *RootActor) DownloadTx(block, round uint32, txHash []byte) {
+func (a *RootActor) DownloadTx(height, round uint32, txHash []byte) {
 	// do both pending and mined
-	panic("not implemented")
+	req := NewTxDownloadRequest(txHash, PendingAndMinedTxRequest, height, round)
+	a.download(req)
+}
+
+func (a *RootActor) DownloadBlockHeader(height, round uint32) {
+	req := NewBlockHeaderDownloadRequest(height, round, BlockHeaderRequest)
+	a.download(req)
 }
 
 func (a *RootActor) download(b DownloadRequest) {
+	exists := false
 	func() {
 		a.Lock()
 		defer a.Unlock()
 		// ADD TO MAPPING OF OUTSTANDING REQUESTS IF NOT PRESENT
 		// IF IS PRESENT, RETURN
+		if _, exists = a.reqs[b]; !exists {
+			a.reqs[b] = true
+		}
 	}()
+	if exists {
+		return
+	}
 	select {
 	case a.dispatchQ <- b:
 		a.wg.Add(1)
@@ -773,6 +631,8 @@ func (a *RootActor) await(req DownloadRequest) {
 					a.Lock()
 					defer a.Unlock()
 					// CLEANUP MAPPING OF OUTSTANDING REQUESTS
+					// a.reqs = make(map[DownloadRequest]bool)
+					delete(a.reqs, req)
 				}()
 				a.download(req)
 			}
@@ -782,6 +642,8 @@ func (a *RootActor) await(req DownloadRequest) {
 					a.Lock()
 					defer a.Unlock()
 					// CLEANUP MAPPING OF OUTSTANDING REQUESTS
+					// a.reqs = make(map[DownloadRequest]bool)
+					delete(a.reqs, req)
 				}()
 				a.download(req)
 			}
@@ -793,6 +655,8 @@ func (a *RootActor) await(req DownloadRequest) {
 					a.Lock()
 					defer a.Unlock()
 					// CLEANUP MAPPING OF OUTSTANDING REQUESTS
+					// a.reqs = make(map[DownloadRequest]bool)
+					delete(a.reqs, req)
 				}()
 				a.download(req)
 			}
@@ -802,6 +666,8 @@ func (a *RootActor) await(req DownloadRequest) {
 					a.Lock()
 					defer a.Unlock()
 					// CLEANUP MAPPING OF OUTSTANDING REQUESTS
+					// a.reqs = make(map[DownloadRequest]bool)
+					delete(a.reqs, req)
 				}()
 				a.download(req)
 			}
@@ -833,13 +699,18 @@ func NewBlockActor(wg *sync.WaitGroup, closeChan chan struct{}, workQ chan Downl
 func (a *BlockActor) Run() {
 	defer a.wg.Done()
 	for {
+		fmt.Println("in blockactor run")
 		select {
 		case req := <-a.WorkQ:
+			// fmt.Println("received a request from work q")
+			// should this be less than or equal to ?
 			if req.RequestHeight() < a.CurrentHeight {
+				// fmt.Println("req height less than curr height")
 				close(req.ResponseChan())
 				continue
 			}
 			if req.RequestHeight() > a.CurrentHeight {
+				// fmt.Println("req height greater than curr height")
 				func() {
 					a.Lock()
 					defer a.Unlock()
@@ -848,6 +719,7 @@ func (a *BlockActor) Run() {
 			}
 			go a.Await(req)
 		case <-a.CloseChan:
+			fmt.Println("closing block actor run")
 			return
 		}
 	}
@@ -875,6 +747,7 @@ func (a *BlockActor) Await(req DownloadRequest) {
 	}
 	select {
 	case resp := <-subReq.ResponseChan():
+		fmt.Println("received a response in block actor")
 		if resp == nil {
 			close(req.ResponseChan())
 			return
@@ -888,6 +761,7 @@ func (a *BlockActor) Await(req DownloadRequest) {
 			close(req.ResponseChan())
 			return
 		}
+		fmt.Println("response accepted in block actor")
 		select {
 		case req.ResponseChan() <- resp:
 			return
@@ -921,6 +795,7 @@ func NewRoundActor(wg *sync.WaitGroup, closeChan chan struct{}, workQ chan Downl
 func (a *RoundActor) Run() {
 	defer a.wg.Done()
 	for {
+		fmt.Println("in round actor run")
 		select {
 		case req := <-a.WorkQ:
 			if req.RequestRound() < a.CurrentRound {
@@ -936,6 +811,7 @@ func (a *RoundActor) Run() {
 			}
 			go a.Await(req)
 		case <-a.CloseChan:
+			fmt.Println("closing round actor run")
 			return
 		}
 	}
@@ -953,6 +829,7 @@ func (a *RoundActor) Await(req DownloadRequest) {
 			return
 		}
 	case BlockHeaderRequest:
+		fmt.Println("received a bh dl req")
 		reqTyped := req.(*BlockHeaderDownloadRequest)
 		subReq = NewBlockHeaderDownloadRequest(reqTyped.Height, reqTyped.Round, reqTyped.downloadType)
 		select {
@@ -961,24 +838,25 @@ func (a *RoundActor) Await(req DownloadRequest) {
 			return
 		}
 	}
+	fmt.Println("round actor about to wait for response")
 	select {
 	case resp := <-subReq.ResponseChan():
+		fmt.Println("received a response in round actor")
 		ok := func() bool {
 			a.RLock()
 			defer a.RUnlock()
-			if resp.RequestRound() < a.CurrentRound {
-				return false
-			}
-			return true
+			return resp.RequestRound() >= a.CurrentRound
 		}()
 		if !ok {
 			close(req.ResponseChan())
 			return
 		}
+		fmt.Println("response accepted in round actor")
 		select {
 		case req.ResponseChan() <- resp:
 			return
 		case <-a.CloseChan:
+			fmt.Println("closing round actor await")
 			return
 		}
 	case <-a.CloseChan:
@@ -1045,12 +923,16 @@ func (a *DownloadActor) Run() {
 					return
 				}
 			case BlockHeaderRequest:
+				fmt.Println("received a block header req in dl actor")
 				select {
 				case a.BlockDispatchQ <- req.(*BlockHeaderDownloadRequest):
 				case <-a.CloseChan:
 					return
 				}
 			}
+		case <-a.CloseChan:
+			fmt.Println("closing download actor run")
+			return
 		}
 	}
 }
@@ -1099,7 +981,7 @@ func (a *MinedDownloadActor) Run() {
 				return tx, nil
 			}(reqOrig)
 			select {
-			case reqOrig.ResponseChan() <- NewTxDownloadResponse(reqOrig, tx, err):
+			case reqOrig.ResponseChan() <- NewTxDownloadResponse(reqOrig, tx, MinedTxResponse, err):
 				continue
 			case <-a.CloseChan:
 				return
@@ -1152,7 +1034,7 @@ func (a *PendingDownloadActor) Run() {
 				return tx, nil
 			}(reqOrig)
 			select {
-			case reqOrig.ResponseChan() <- NewTxDownloadResponse(reqOrig, tx, err):
+			case reqOrig.ResponseChan() <- NewTxDownloadResponse(reqOrig, tx, PendingTxResponse, err):
 				continue
 			case <-a.CloseChan:
 				return
@@ -1182,6 +1064,7 @@ func (a *BlockHeaderDownloadActor) Run() {
 	for {
 		select {
 		case <-a.CloseChan:
+			fmt.Println("closing bh download actor run")
 			return
 		case reqOrig := <-a.WorkQ:
 			bh, err := func(req *BlockHeaderDownloadRequest) (*objs.BlockHeader, error) {
@@ -1199,7 +1082,7 @@ func (a *BlockHeaderDownloadActor) Run() {
 				return bhLst[0], nil
 			}(reqOrig)
 			select {
-			case reqOrig.ResponseChan() <- NewBlockHeaderDownloadResponse(reqOrig, bh, err):
+			case reqOrig.ResponseChan() <- NewBlockHeaderDownloadResponse(reqOrig, bh, BlockHeaderResponse, err):
 				continue
 			case <-a.CloseChan:
 				return
