@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/MadBase/MadNet/constants"
@@ -254,7 +253,9 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 	if !inCache {
 		// was using rs.round for last value here previously
 		dm.downloadActor.DownloadBlockHeader(rs.OwnState.SyncToBH.BClaims.Height+1, 0)
-		return nil, nil, errorz.ErrInvalid{}.New("block header was not in the bh cache")
+		err := errorz.ErrInvalid{}.New("block header was not in the bh cache")
+		utils.DebugTrace(dm.logger, err)
+		return nil, nil, err
 	} else {
 		txs, missing, err := dm.GetTxs(txn, rs.OwnState.SyncToBH.BClaims.Height+1, 0, bhCache.TxHshLst)
 		if err != nil {
@@ -263,7 +264,9 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 		}
 		if len(missing) > 0 {
 			dm.DownloadTxs(rs.OwnState.SyncToBH.BClaims.Height+1, 0, missing)
-			return nil, nil, errorz.ErrInvalid{}.New("missing transactions")
+			err := errorz.ErrInvalid{}.New("missing transactions")
+			utils.DebugTrace(dm.logger, err)
+			return nil, nil, err
 		}
 
 		// check the chainID of bh
@@ -273,7 +276,9 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 
 		// check the height of the bh
 		if bhCache.BClaims.Height != rs.OwnState.SyncToBH.BClaims.Height+1 {
-			return nil, nil, errorz.ErrInvalid{}.New("Wrong block height")
+			err := errorz.ErrInvalid{}.New("Wrong block height")
+			utils.DebugTrace(dm.logger, err)
+			return nil, nil, err
 		}
 		prevBHsh, err := rs.OwnState.SyncToBH.BlockHash() // get block hash
 		if err != nil {
@@ -289,11 +294,11 @@ func (dm *DMan) SyncOneBH(txn *badger.Txn, rs *RoundStates) ([]interfaces.Transa
 		bnVal := &crypto.BNGroupValidator{}
 
 		// verify the signature and group key
-		GroupKey := bhCache.GroupKey
 		if err := bhCache.ValidateSignatures(bnVal); err != nil {
 			utils.DebugTrace(dm.logger, err)
 			return nil, nil, errorz.ErrInvalid{}.New(err.Error())
 		}
+		GroupKey := bhCache.GroupKey
 		if !bytes.Equal(GroupKey, rs.ValidatorSet.GroupKey) {
 			return nil, nil, errorz.ErrInvalid{}.New("group key does not match expected")
 		}
@@ -535,6 +540,12 @@ type RootActor struct {
 func (a *RootActor) Init(logger *logrus.Logger, rb *request.Client, unmarshalTx func([]byte) (interfaces.Transaction, error)) {
 	a.reqs = make(map[DownloadRequest]bool)
 
+	a.bhc = &bHCache{}
+	a.txc = &txCache{}
+
+	a.bhc.init()
+	a.txc.init()
+
 	numWorkers := 10
 	a.wg = new(sync.WaitGroup)
 	a.closeChan = make(chan struct{}, 1)
@@ -548,7 +559,7 @@ func (a *RootActor) Init(logger *logrus.Logger, rb *request.Client, unmarshalTx 
 	go ra.Run()
 	da := NewDownloadActor(a.wg, a.closeChan, ra.DisptachQ)
 	a.wg.Add(1)
-	go ra.Run()
+	go da.Run()
 	for i := 0; i < numWorkers; i++ {
 		pa := NewPendingDownloadActor(a.wg, a.closeChan, da.PendingDispatchQ) // da actor dispatch is work q of dl handlers
 		pa.Logger = logger
@@ -699,10 +710,9 @@ func NewBlockActor(wg *sync.WaitGroup, closeChan chan struct{}, workQ chan Downl
 func (a *BlockActor) Run() {
 	defer a.wg.Done()
 	for {
-		fmt.Println("in blockactor run")
+		// fmt.Println("in blockactor run")
 		select {
 		case req := <-a.WorkQ:
-			// fmt.Println("received a request from work q")
 			// should this be less than or equal to ?
 			if req.RequestHeight() < a.CurrentHeight {
 				// fmt.Println("req height less than curr height")
@@ -719,7 +729,7 @@ func (a *BlockActor) Run() {
 			}
 			go a.Await(req)
 		case <-a.CloseChan:
-			fmt.Println("closing block actor run")
+			// fmt.Println("closing block actor run")
 			return
 		}
 	}
@@ -747,7 +757,7 @@ func (a *BlockActor) Await(req DownloadRequest) {
 	}
 	select {
 	case resp := <-subReq.ResponseChan():
-		fmt.Println("received a response in block actor")
+		// fmt.Println("received a response in block actor")
 		if resp == nil {
 			close(req.ResponseChan())
 			return
@@ -761,7 +771,7 @@ func (a *BlockActor) Await(req DownloadRequest) {
 			close(req.ResponseChan())
 			return
 		}
-		fmt.Println("response accepted in block actor")
+		// fmt.Println("response accepted in block actor")
 		select {
 		case req.ResponseChan() <- resp:
 			return
@@ -795,7 +805,7 @@ func NewRoundActor(wg *sync.WaitGroup, closeChan chan struct{}, workQ chan Downl
 func (a *RoundActor) Run() {
 	defer a.wg.Done()
 	for {
-		fmt.Println("in round actor run")
+		// fmt.Println("in round actor run")
 		select {
 		case req := <-a.WorkQ:
 			if req.RequestRound() < a.CurrentRound {
@@ -811,7 +821,7 @@ func (a *RoundActor) Run() {
 			}
 			go a.Await(req)
 		case <-a.CloseChan:
-			fmt.Println("closing round actor run")
+			// fmt.Println("closing round actor run")
 			return
 		}
 	}
@@ -829,7 +839,7 @@ func (a *RoundActor) Await(req DownloadRequest) {
 			return
 		}
 	case BlockHeaderRequest:
-		fmt.Println("received a bh dl req")
+		// fmt.Println("received a bh dl req")
 		reqTyped := req.(*BlockHeaderDownloadRequest)
 		subReq = NewBlockHeaderDownloadRequest(reqTyped.Height, reqTyped.Round, reqTyped.downloadType)
 		select {
@@ -838,10 +848,10 @@ func (a *RoundActor) Await(req DownloadRequest) {
 			return
 		}
 	}
-	fmt.Println("round actor about to wait for response")
+	// fmt.Println("round actor about to wait for response")
 	select {
 	case resp := <-subReq.ResponseChan():
-		fmt.Println("received a response in round actor")
+		// fmt.Println("received a response in round actor")
 		ok := func() bool {
 			a.RLock()
 			defer a.RUnlock()
@@ -851,12 +861,12 @@ func (a *RoundActor) Await(req DownloadRequest) {
 			close(req.ResponseChan())
 			return
 		}
-		fmt.Println("response accepted in round actor")
+		// fmt.Println("response accepted in round actor")
 		select {
 		case req.ResponseChan() <- resp:
 			return
 		case <-a.CloseChan:
-			fmt.Println("closing round actor await")
+			// fmt.Println("closing round actor await")
 			return
 		}
 	case <-a.CloseChan:
@@ -923,7 +933,7 @@ func (a *DownloadActor) Run() {
 					return
 				}
 			case BlockHeaderRequest:
-				fmt.Println("received a block header req in dl actor")
+				// fmt.Println("received a block header req in dl actor")
 				select {
 				case a.BlockDispatchQ <- req.(*BlockHeaderDownloadRequest):
 				case <-a.CloseChan:
@@ -931,7 +941,7 @@ func (a *DownloadActor) Run() {
 				}
 			}
 		case <-a.CloseChan:
-			fmt.Println("closing download actor run")
+			// fmt.Println("closing download actor run")
 			return
 		}
 	}
@@ -1064,7 +1074,7 @@ func (a *BlockHeaderDownloadActor) Run() {
 	for {
 		select {
 		case <-a.CloseChan:
-			fmt.Println("closing bh download actor run")
+			// fmt.Println("closing bh download actor run")
 			return
 		case reqOrig := <-a.WorkQ:
 			bh, err := func(req *BlockHeaderDownloadRequest) (*objs.BlockHeader, error) {

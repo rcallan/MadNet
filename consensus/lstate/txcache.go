@@ -36,6 +36,9 @@ func (txc *txCache) add(height uint32, tx interfaces.Transaction) error {
 	if err != nil {
 		return err
 	}
+	if _, exists := txc.cache[height]; !exists {
+		txc.cache[height] = make(map[string]string)
+	}
 	// txc.cache.Add(string(txHash), string(txb))
 	txc.cache[height][string(txHash)] = string(txb)
 	return nil
